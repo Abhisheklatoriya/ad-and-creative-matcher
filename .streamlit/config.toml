@@ -1,0 +1,4 @@
+[server]
+maxUploadSize = 1000  # Sets limit to 1GB
+enableCORS = false
+enableXsrfProtection = false
