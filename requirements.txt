@@ -1,2 +1,3 @@
-python-docx
 streamlit
+python-docx
+python-pptx
