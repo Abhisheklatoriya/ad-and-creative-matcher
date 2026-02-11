@@ -1,94 +1,107 @@
 import streamlit as st
 from pptx import Presentation
 import re
-import json
+import zipfile
 import io
-import os
 
-st.set_page_config(page_title="Ad Matcher - Session Sync", layout="wide")
+st.set_page_config(page_title="Direct PPTX Ad Matcher", layout="wide")
 
-# --- 1. LIGHTWEIGHT PPTX EXTRACTOR ---
 @st.cache_data
-def get_pptx_info(file_bytes):
-    prs = Presentation(io.BytesIO(file_bytes))
-    slides_data = []
-    for slide in prs.slides:
-        text = "\n".join([sh.text.strip() for sh in slide.shapes if hasattr(sh, "text")])
-        codes = re.findall(r'\b\d{8}\b', text)
+def extract_data_from_pptx(file):
+    """Parses PPTX slides to find Ad Codes and associated text blocks."""
+    prs = Presentation(file)
+    full_slides_data = []
+    all_codes = []
+
+    for i, slide in enumerate(prs.slides):
+        slide_text = []
+        for shape in slide.shapes:
+            if hasattr(shape, "text"):
+                slide_text.append(shape.text.strip())
+        
+        combined_text = "\n".join(slide_text)
+        # Find 8-digit codes (e.g., 48735196)
+        codes = re.findall(r'\b\d{8}\b', combined_text)
+        
         if codes:
-            slides_data.append({"codes": codes, "text": text})
-    return slides_data
+            all_codes.extend(codes)
+            full_slides_data.append({"codes": codes, "text": combined_text})
+            
+    return sorted(list(set(all_codes))), full_slides_data
 
-# --- 2. ASSET INDEXER (SAVES FILENAMES ONLY) ---
 @st.cache_resource
-def index_assets(uploaded_files):
-    # Store filename -> bytes mapping
-    return {f.name: f.getvalue() for f in uploaded_files if not f.name.endswith('.pptx') and not f.name.endswith('.json')}
+def load_assets(uploaded_files):
+    """Processes individual files or ZIP folders into memory."""
+    processed_assets = []
+    for uploaded_file in uploaded_files:
+        if uploaded_file.name.lower().endswith('.zip'):
+            with zipfile.ZipFile(uploaded_file) as z:
+                for file_info in z.infolist():
+                    if file_info.is_dir() or "__MACOSX" in file_info.filename:
+                        continue
+                    with z.open(file_info) as f:
+                        processed_assets.append({
+                            "name": file_info.filename,
+                            "data": f.read(),
+                            "ext": file_info.filename.split('.')[-1].lower()
+                        })
+        else:
+            processed_assets.append({
+                "name": uploaded_file.name,
+                "data": uploaded_file.getvalue(),
+                "ext": uploaded_file.name.split('.')[-1].lower()
+            })
+    return processed_assets
 
-st.title("🧠 Ad Matcher: Session Brain")
+st.title("⚡ Direct PPTX to Creative Matcher")
 
 with st.sidebar:
-    st.header("1. Upload Data")
-    pptx_file = st.file_uploader("Upload MediaRadar PPTX", type=['pptx'])
-    asset_files = st.file_uploader("Upload Assets (Multiple)", accept_multiple_files=True)
+    st.header("Upload Data")
+    pptx_file = st.file_uploader("Upload PowerPoint Report", type=['pptx'])
+    raw_files = st.file_uploader("Upload Assets (Individual or ZIP)", accept_multiple_files=True)
+    if st.button("Reset App"):
+        st.cache_resource.clear()
+        st.cache_data.clear()
+        st.rerun()
+
+if pptx_file and raw_files:
+    ad_codes, slides_content = extract_data_from_pptx(pptx_file)
+    all_assets = load_assets(raw_files)
+
+    st.success(f"Extracted {len(ad_codes)} Ad Codes from PowerPoint and loaded {len(all_assets)} assets.")
     
-    st.divider()
-    st.header("2. Sync Session")
-    # This is where your colleague uploads the tiny file you sent them
-    session_file = st.file_uploader("Upload 'session_work.json'", type=['json'])
-
-if pptx_file and asset_files:
-    slides = get_pptx_info(pptx_file.read())
-    asset_map = index_assets(asset_files)
-    all_codes = sorted(list(set([c for s in slides for c in s['codes']])))
-
-    # Initialize session state for notes/work
-    if session_file:
-        st.session_state.notes = json.load(session_file)
-        st.sidebar.success("✅ Session Brain Synced!")
-    elif 'notes' not in st.session_state:
-        st.session_state.notes = {}
-
-    # --- THE "SAVE WORK" BUTTON ---
-    st.sidebar.divider()
-    st.sidebar.header("3. Save Progress")
-    json_data = json.dumps(st.session_state.notes)
-    st.sidebar.download_button(
-        label="💾 Download session_work.json",
-        data=json_data,
-        file_name="session_work.json",
-        mime="application/json",
-        help="Send this tiny file to your colleague to share your progress."
-    )
-
-    # --- MAIN VIEW ---
-    search = st.text_input("🔍 Search Ad Code", placeholder="Type 8-digit code...")
-    display_codes = [c for c in all_codes if search in c] if search else all_codes[:10]
+    search = st.text_input("🔍 Filter by Ad Code", placeholder="e.g. 48735196")
+    display_codes = [c for c in ad_codes if search in c] if search else ad_codes
 
     for code in display_codes:
-        # Automatic matching based on filename
-        matches = [name for name in asset_map.keys() if code in name]
-        slide_text = next((s['text'] for s in slides if code in s['codes']), "No details.")
+        # Find the specific text block from PPTX for this code
+        relevant_text = next((item['text'] for item in slides_content if code in item['codes']), "Details not found.")
+        # Find matching creative files
+        matches = [a for a in all_assets if code in a['name']]
         
-        with st.expander(f"📦 Ad {code} ({len(matches)} files)"):
-            c1, c2 = st.columns([1, 2])
-            with c1:
-                st.markdown("**PPTX Metadata**")
-                st.caption(slide_content := st.session_state.notes.get(f"meta_{code}", slide_text))
-                
-                # Allow user to add persistent notes that get saved in the JSON
-                user_note = st.text_area("Session Notes:", value=st.session_state.notes.get(code, ""), key=f"note_{code}")
-                st.session_state.notes[code] = user_note
+        with st.expander(f"📦 Ad Code: {code} ({len(matches)} files found)", expanded=True):
+            col1, col2 = st.columns([1, 1.5])
             
-            with c2:
-                for fname in matches:
-                    st.write(f"📄 {fname}")
-                    data = asset_map[fname]
-                    ext = fname.split('.')[-1].lower()
-                    if ext in ['mp4', 'mov']: st.video(data)
-                    elif ext in ['jpg', 'png', 'jpeg']: st.image(data)
-                    elif ext in ['mp3', 'wav']: st.audio(data)
-                    st.divider()
+            with col1:
+                st.markdown("**Details from PPTX:**")
+                # Clean up the display text for just this ad
+                pattern = f"Ad Code: {code}.*?(?=Ad Code:|$)"
+                clean_match = re.search(pattern, relevant_text, re.DOTALL)
+                st.info(clean_match.group(0) if clean_match else relevant_text)
 
+            with col2:
+                if matches:
+                    for asset in matches:
+                        st.caption(f"File: {asset['name']}")
+                        if asset['ext'] in ['mp4', 'mov', 'webm']:
+                            st.video(asset['data'])
+                        elif asset['ext'] in ['mp3', 'wav']:
+                            st.audio(asset['data'])
+                        elif asset['ext'] in ['jpg', 'jpeg', 'png', 'gif']:
+                            st.image(asset['data'])
+                        st.download_button("Download Asset", data=asset['data'], file_name=asset['name'], key=f"{code}_{asset['name']}")
+                        st.divider()
+                else:
+                    st.warning("No creative file found with this Ad Code in the filename.")
 else:
-    st.info("Please upload your PPTX and Assets to begin.")
+    st.info("Please upload the PPTX report and your assets to begin.")
