@@ -1,23 +1,37 @@
 import streamlit as st
-import docx
+from pptx import Presentation
 import re
 import zipfile
 import io
 
-# 1. Expand limits and set layout
-st.set_page_config(page_title="Ad Matcher High-Speed", layout="wide")
+st.set_page_config(page_title="Direct PPTX Ad Matcher", layout="wide")
 
-# 2. Cache the Word Document extraction
 @st.cache_data
-def get_ad_data(file):
-    doc = docx.Document(file)
-    text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-    codes = sorted(list(set(re.findall(r'\b\d{8}\b', text))))
-    return codes, text
+def extract_data_from_pptx(file):
+    """Parses PPTX slides to find Ad Codes and associated text blocks."""
+    prs = Presentation(file)
+    full_slides_data = []
+    all_codes = []
 
-# 3. Cache the Assets in memory so they don't reload on every click
+    for i, slide in enumerate(prs.slides):
+        slide_text = []
+        for shape in slide.shapes:
+            if hasattr(shape, "text"):
+                slide_text.append(shape.text.strip())
+        
+        combined_text = "\n".join(slide_text)
+        # Find 8-digit codes (e.g., 48735196)
+        codes = re.findall(r'\b\d{8}\b', combined_text)
+        
+        if codes:
+            all_codes.extend(codes)
+            full_slides_data.append({"codes": codes, "text": combined_text})
+            
+    return sorted(list(set(all_codes))), full_slides_data
+
 @st.cache_resource
 def load_assets(uploaded_files):
+    """Processes individual files or ZIP folders into memory."""
     processed_assets = []
     for uploaded_file in uploaded_files:
         if uploaded_file.name.lower().endswith('.zip'):
@@ -25,16 +39,13 @@ def load_assets(uploaded_files):
                 for file_info in z.infolist():
                     if file_info.is_dir() or "__MACOSX" in file_info.filename:
                         continue
-                    # Read into memory
                     with z.open(file_info) as f:
-                        data = f.read()
                         processed_assets.append({
                             "name": file_info.filename,
-                            "data": data,
+                            "data": f.read(),
                             "ext": file_info.filename.split('.')[-1].lower()
                         })
         else:
-            # Handle individual files
             processed_assets.append({
                 "name": uploaded_file.name,
                 "data": uploaded_file.getvalue(),
@@ -42,55 +53,55 @@ def load_assets(uploaded_files):
             })
     return processed_assets
 
-st.title("⚡ Ultra-Fast Ad Matcher")
+st.title("⚡ Direct PPTX to Creative Matcher")
 
-# Sidebar Uploads
 with st.sidebar:
-    st.header("Upload")
-    word_file = st.file_uploader("Upload Word Doc", type=['docx'])
-    raw_files = st.file_uploader("Upload Assets or ZIP", accept_multiple_files=True)
-    if st.button("Clear Cache / Reset"):
+    st.header("Upload Data")
+    pptx_file = st.file_uploader("Upload PowerPoint Report", type=['pptx'])
+    raw_files = st.file_uploader("Upload Assets (Individual or ZIP)", accept_multiple_files=True)
+    if st.button("Reset App"):
         st.cache_resource.clear()
+        st.cache_data.clear()
         st.rerun()
 
-if word_file and raw_files:
-    # This runs once and stays in memory
+if pptx_file and raw_files:
+    ad_codes, slides_content = extract_data_from_pptx(pptx_file)
     all_assets = load_assets(raw_files)
-    ad_codes, full_text = get_ad_data(word_file)
 
-    st.success(f"Loaded {len(all_assets)} files. Found {len(ad_codes)} Ad Codes.")
+    st.success(f"Extracted {len(ad_codes)} Ad Codes from PowerPoint and loaded {len(all_assets)} assets.")
     
-    # Fast Search
-    search = st.text_input("🔍 Quick Search Ad Code", placeholder="Type to filter...")
-    filtered_codes = [c for c in ad_codes if search in c] if search else ad_codes
+    search = st.text_input("🔍 Filter by Ad Code", placeholder="e.g. 48735196")
+    display_codes = [c for c in ad_codes if search in c] if search else ad_codes
 
-    for code in filtered_codes:
-        # Match based on filename containing the code
+    for code in display_codes:
+        # Find the specific text block from PPTX for this code
+        relevant_text = next((item['text'] for item in slides_content if code in item['codes']), "Details not found.")
+        # Find matching creative files
         matches = [a for a in all_assets if code in a['name']]
         
-        if matches:
-            with st.expander(f"✅ Ad {code} - {len(matches)} files found", expanded=True):
-                c1, c2 = st.columns([1, 1.5])
-                
-                with c1:
-                    st.markdown("**Ad Specs:**")
-                    pattern = f"{code}.*?(?=\\n\\n|Ad Code:|$)"
-                    found = re.search(pattern, full_text, re.DOTALL)
-                    st.code(found.group(0) if found else f"Ad Code: {code}", language=None)
-                
-                with c2:
+        with st.expander(f"📦 Ad Code: {code} ({len(matches)} files found)", expanded=True):
+            col1, col2 = st.columns([1, 1.5])
+            
+            with col1:
+                st.markdown("**Details from PPTX:**")
+                # Clean up the display text for just this ad
+                pattern = f"Ad Code: {code}.*?(?=Ad Code:|$)"
+                clean_match = re.search(pattern, relevant_text, re.DOTALL)
+                st.info(clean_match.group(0) if clean_match else relevant_text)
+
+            with col2:
+                if matches:
                     for asset in matches:
                         st.caption(f"File: {asset['name']}")
-                        # Media logic
                         if asset['ext'] in ['mp4', 'mov', 'webm']:
                             st.video(asset['data'])
                         elif asset['ext'] in ['mp3', 'wav']:
                             st.audio(asset['data'])
                         elif asset['ext'] in ['jpg', 'jpeg', 'png', 'gif']:
                             st.image(asset['data'])
-                        
-                        st.download_button("Download", data=asset['data'], file_name=asset['name'], key=f"dl_{asset['name']}_{code}")
+                        st.download_button("Download Asset", data=asset['data'], file_name=asset['name'], key=f"{code}_{asset['name']}")
                         st.divider()
-
+                else:
+                    st.warning("No creative file found with this Ad Code in the filename.")
 else:
-    st.info("Please upload your Word doc and creative assets to begin.")
+    st.info("Please upload the PPTX report and your assets to begin.")
